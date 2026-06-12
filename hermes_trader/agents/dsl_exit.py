@@ -459,6 +459,32 @@ def _policy_from_config() -> ExitPolicy:
         return ExitPolicy()
 
 
+def _position_open_time_s(coin: str, side: str) -> float:
+    """Best-effort epoch (s) when the live position was opened, from the
+    account's fill history: the most recent fill that opened it FROM FLAT.
+
+    Synthesized trackers used to stamp entry_time=now, which RESET the
+    hard-timeout clock — a 2h50m-old position got a fresh 3h lease on every
+    daemon restart. Falls back to now when history is unavailable (paper
+    mode, API flake, or a position older than the fill-history window).
+    """
+    try:
+        from hermes_trader.client.hl_client import _http_post, resolve_user_address
+        user = resolve_user_address()
+        if not user or user == "paper":
+            return time.time()
+        fills = _http_post("/info", {"type": "userFills", "user": user}) or []
+        want_dir = "Open Long" if side == "long" else "Open Short"
+        for f in fills:  # newest first
+            if f.get("coin") != coin:
+                continue
+            if f.get("dir") == want_dir and float(f.get("startPosition", 0) or 0) == 0:
+                return float(f["time"]) / 1000.0
+    except Exception as e:
+        logger.warning(f"[dsl] open-time lookup failed for {coin}: {e}")
+    return time.time()
+
+
 def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
                             policy: Optional[ExitPolicy] = None,
                             default_leverage: int = 1,
@@ -501,10 +527,15 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
             # the default silently widened live stops ("policy drift"). Pull
             # config when the caller didn't pass an explicit policy.
             synth_policy = policy if policy is not None else _policy_from_config()
-            _active_positions[key] = DSLTracker(coin, side, entry, time.time(), synth_policy,
+            # Use the REAL open time from fill history (fallback: now) so a
+            # restart doesn't re-arm hard_timeout_minutes from scratch.
+            opened_at = _position_open_time_s(coin, side)
+            _active_positions[key] = DSLTracker(coin, side, entry, opened_at, synth_policy,
                                                 leverage=lev)
             added += 1
-            logger.info(f"[dsl] Synthesized tracker for existing {key} @ {entry} ({lev}x)")
+            age_min = max(0.0, (time.time() - opened_at) / 60.0)
+            logger.info(f"[dsl] Synthesized tracker for existing {key} @ {entry} "
+                        f"({lev}x, opened {age_min:.0f}m ago)")
 
     def _key_in_queried_scope(k: str) -> bool:
         """True iff the dex behind this tracker key was queried this cycle.

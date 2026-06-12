@@ -305,11 +305,15 @@ def maybe_execute(analysis: Dict[str, Any]) -> Dict[str, Any]:
     memory.track_daily_pnl(agg_equity)
     daily_pnl = memory.get_daily_pnl()
 
+    # Notional from HL's own positionValue (|szi| × live mark). The old
+    # reconstruction multiplied szi by the ANALYSIS entry price — stale by
+    # however long the position had been open — skewing the exposure gates.
     positions = [
         {
             "coin": p["position"]["coin"],
             "side": "long" if float(p["position"]["szi"]) > 0 else "short",
-            "size_usd": abs(float(p["position"]["szi"])) * (analysis.get("entry_px") or 0),
+            "size_usd": float(p["position"].get("positionValue") or 0)
+                        or abs(float(p["position"]["szi"])) * (analysis.get("entry_px") or 0),
         }
         for p in state["asset_positions"]
     ]
@@ -436,7 +440,8 @@ def maybe_execute(analysis: Dict[str, Any]) -> Dict[str, Any]:
             "gate_results": gate_output["results"],
         }
 
-    if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
+    # PAPER mode trades against the simulated book — no signing key involved.
+    if mode != "PAPER" and not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
         return {
             "executed": False, "mode": mode,
             "analysis_id": analysis["id"],
@@ -522,11 +527,28 @@ def maybe_execute(analysis: Dict[str, Any]) -> Dict[str, Any]:
     sl_atr_mult = float(config.get("sl_atr_mult", _DEFAULT_SL_ATR_MULT))
     if atr > 0 and size_in_coin > 0:
         sl_px = mid_price - atr * sl_atr_mult if is_buy else mid_price + atr * sl_atr_mult
-        sl_res = place_hl_trigger_order(is_buy, size_in_coin, sl_px, "sl", coin)
+        # is_buy == "entry was a buy" == "position is long" — pass it under its
+        # positional meaning explicitly so a refactor of the entry-direction
+        # variable can't silently invert the trigger side.
+        sl_res = place_hl_trigger_order(is_long_position=is_buy, size=size_in_coin,
+                                        trigger_px=sl_px, kind="sl", coin=coin)
+        if not sl_res.get("ok"):
+            # One retry — the common failure is a transient meta-cache/429 flake.
+            sl_res = place_hl_trigger_order(is_long_position=is_buy, size=size_in_coin,
+                                            trigger_px=sl_px, kind="sl", coin=coin)
         if sl_res.get("ok"):
             logger.info(f"[executor] Placed backup SL at {sl_px} ({sl_atr_mult}x ATR)")
         else:
-            logger.error(f"[executor] Backup SL FAILED for {coin}: {sl_res.get('error')}")
+            # The position now runs with the 60s DSL loop as its ONLY stop.
+            # Surface that loudly in the session feed, not just the log file.
+            logger.error(f"[executor] Backup SL FAILED for {coin} after retry: {sl_res.get('error')}")
+            try:
+                from hermes_trader.session_log import append as _log_event
+                _log_event({"event": "error", "scope": "backup_sl",
+                            "coin": coin, "side": trade_side,
+                            "error": str(sl_res.get("error"))})
+            except Exception:
+                pass
 
     # Take-profit scale-out — the OFFENSIVE complement to the backup SL. Banks a
     # fraction of the position SERVER-SIDE at the TP target so a winner is
@@ -538,7 +560,11 @@ def maybe_execute(analysis: Dict[str, Any]) -> Dict[str, Any]:
     if atr > 0 and size_in_coin > 0 and 0 < tp_scale_fraction <= 1.0:
         tp_px_trig = mid_price + atr * TP_ATR_MULT if is_buy else mid_price - atr * TP_ATR_MULT
         tp_size = size_in_coin * tp_scale_fraction
-        tp_res = place_hl_trigger_order(is_buy, tp_size, tp_px_trig, "tp", coin)
+        tp_res = place_hl_trigger_order(is_long_position=is_buy, size=tp_size,
+                                        trigger_px=tp_px_trig, kind="tp", coin=coin)
+        if not tp_res.get("ok"):
+            tp_res = place_hl_trigger_order(is_long_position=is_buy, size=tp_size,
+                                            trigger_px=tp_px_trig, kind="tp", coin=coin)
         if tp_res.get("ok"):
             logger.info(f"[executor] Placed TP scale-out {tp_scale_fraction:.0%} "
                         f"at {tp_px_trig} ({TP_ATR_MULT}x ATR)")
@@ -681,17 +707,71 @@ def close_position_market(coin: str) -> Dict[str, Any]:
     # reduce_only: a close must only FLATTEN. Without it, the $10-min size floor in
     # place_hl_order overshoots a sub-$10 position and flips it to the opposite side
     # (the BIRD short<->long churn loop). reduce_only makes HL ignore the excess.
-    res = place_hl_order(is_buy=not is_long, size=abs(szi), mid_price=mid_price, coin=coin,
-                         reduce_only=True)
+    #
+    # An IOC reduce-only can PARTIALLY fill on a thin book — HL reports ok with
+    # totalSz < requested. Deregistering on that would orphan the residual
+    # position with no stop/floor/timeout, so: retry the residual a couple of
+    # times, and if any size still remains, KEEP the DSL tracker and report a
+    # failed close — the next DSL tick re-fires it against the live size.
+    requested = abs(szi)
+    remaining = requested
+    fills: List[tuple] = []  # (px, sz) per attempt, for the weighted fill price
+    res: Dict[str, Any] = {}
+    for attempt in range(3):
+        res = place_hl_order(is_buy=not is_long, size=remaining, mid_price=mid_price,
+                             coin=coin, reduce_only=True)
+        if not res.get("ok"):
+            break
+        filled = res.get("total_sz")
+        if filled is None:
+            # No fill size in the response — nothing to reconcile against;
+            # treat as fully filled (pre-totalSz behavior).
+            fills.append((res.get("avg_px") or mid_price, remaining))
+            remaining = 0.0
+            break
+        filled = float(filled)
+        fills.append((res.get("avg_px") or mid_price, filled))
+        remaining = max(0.0, remaining - filled)
+        # Flat within size-tick rounding noise, or dust below $1 notional.
+        if remaining <= requested * 1e-3 or remaining * mid_price < 1.0:
+            remaining = 0.0
+            break
+        logger.warning(
+            f"[executor] PARTIAL close on {coin}: {filled} of {requested} filled "
+            f"(attempt {attempt + 1}/3) — retrying residual {remaining}")
+        time.sleep(0.5)
+        mid_price = get_hl_price(coin) or mid_price
+
+    total_filled = sum(sz for _, sz in fills)
+    avg_fill_px = (sum(px * sz for px, sz in fills) / total_filled) if total_filled else None
     out: Dict[str, Any] = {**res, "coin": coin, "side": side,
                             "entry_px": entry_px, "leverage": leverage}
+
+    if res.get("ok") and remaining > 0:
+        # Residual position still live after retries: keep the tracker so the
+        # stop/timeout keeps covering it. ok=False so callers treat the close
+        # as not-done and the DSL loop retries next tick.
+        logger.error(
+            f"[executor] close on {coin} left a residual of {remaining} "
+            f"after 3 attempts — tracker KEPT, will retry next tick")
+        try:
+            from hermes_trader.session_log import append as _log_event
+            _log_event({"event": "error", "scope": "partial_close",
+                        "coin": coin, "filled_sz": total_filled,
+                        "remaining_sz": remaining})
+        except Exception:
+            pass
+        out.update({"ok": False, "partial": True, "filled_sz": total_filled,
+                    "remaining_sz": remaining,
+                    "error": f"partial_close_residual ({remaining} {coin} unfilled)"})
+        return out
 
     if res.get("ok"):
         deregister_position(coin, side)
         # Cancel the now-stranded reduce-only SL/TP trigger bracket so stale
         # orders don't pile up and reject a future reduce-only order on this coin.
         cancel_open_orders_for_coin(coin)
-        fill_px = res.get("avg_px")
+        fill_px = avg_fill_px or res.get("avg_px")
         if fill_px and entry_px > 0:
             # Spot move from the perspective of the position: long earns when
             # mark rises, short earns when mark falls.
