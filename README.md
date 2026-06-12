@@ -21,6 +21,19 @@ python3 scripts/status.py
 
 Dashboard served at `http://localhost:8000` (port from `HERMES_PORT`).
 
+### Paper trading (no keys, no funds)
+
+Set `"mode": "PAPER"` in `.agent-config.json` and start the loop normally. The
+full pipeline runs against **live market data** — scans, AI research, risk
+gates, DSL exits — but every order is filled by a simulated book
+(`hermes_trader/client/paper_engine.py`): fills at the live L2 touch plus
+`paper_slippage_bps`, taker fees at `paper_fee_bps`, virtual SL/TP triggers
+evaluated against live mids, state persisted to `.paper-state.json` across
+restarts. No `HYPERLIQUID_*` env vars required. Limitations: orders always
+fill in full (no partial fills / book-depth exhaustion) and triggers fill at
+their trigger price — real markets gap. Graduate to `LIVE` only after the
+paper book has survived long enough to trust the configuration.
+
 ---
 
 ## The problem it solves
@@ -211,7 +224,10 @@ both resolve (`max_trade_notional_usd` ≡ `maxTradeNotionalUsd`).
 
 | Key | What it does | Default |
 |-----|--------------|---------|
-| `mode` | `OFF` = analyse only, no orders · `LIVE` = place real orders | `OFF` |
+| `mode` | `OFF` = analyse only, no orders · `PAPER` = simulated fills against live prices, no keys needed · `LIVE` = place real orders | `OFF` |
+| `paper_starting_equity` | PAPER mode: virtual starting balance (USD) | `10000` |
+| `paper_fee_bps` | PAPER mode: taker fee charged per side, in bps | `4.5` |
+| `paper_slippage_bps` | PAPER mode: slippage applied past the live touch on fills | `2` |
 | `equity_fraction_per_trade` | Fraction of perp equity committed as margin per trade — see [Trade Sizing](#trade-sizing) | `0.01` |
 | `leverage` | Leverage **ceiling** — each trade uses `min(this, the coin's own max)`. Coin maxes differ (BOME 3×, BTC 40×). Set high (e.g. 40) to ride each coin's max. Also multiplies position notional. | `5` |
 | `min_ai_confidence` | Minimum AI confidence for a LONG/SHORT to execute | `0.8` |

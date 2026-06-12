@@ -659,5 +659,9 @@ if __name__ == "__main__":
     # (notably PRIVATE_KEY_HEX in client/exchange.py) capture real values.
     import uvicorn
     port = int(os.environ.get("HERMES_PORT", 8000))
-    logger.info(f"Starting Hermes server on port {port}")
-    uvicorn.run("hermes_trader.server:app", host="0.0.0.0", port=port, reload=False)
+    # Localhost by default: the operator endpoints place/close REAL trades
+    # behind a single static token, so never expose them network-wide
+    # implicitly. Containerized deploys (Docker/Fly/k8s) set HERMES_HOST=0.0.0.0.
+    host = os.environ.get("HERMES_HOST", "127.0.0.1")
+    logger.info(f"Starting Hermes server on {host}:{port}")
+    uvicorn.run("hermes_trader.server:app", host=host, port=port, reload=False)

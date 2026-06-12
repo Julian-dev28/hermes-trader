@@ -151,7 +151,15 @@ def get_info() -> "Info | None":
 
 
 def resolve_user_address() -> str:
-    """Master address if set, else wallet address, else empty string."""
+    """Master address if set, else wallet address, else empty string.
+
+    In PAPER mode returns the sentinel "paper" so `if not user` guards
+    (heartbeat, executor, close path) pass without any wallet env vars —
+    every authenticated read/write is intercepted by the paper engine anyway.
+    """
+    from hermes_trader.client.paper_engine import paper_mode_active
+    if paper_mode_active():
+        return "paper"
     return os.environ.get("HYPERLIQUID_MASTER_ADDRESS") or os.environ.get("HYPERLIQUID_WALLET_ADDRESS", "")
 
 
@@ -229,7 +237,13 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
 
     `available` stays main-dex only because HIP-3 free margin only backs
     trades on its own dex; the executor sizes against this for main trades.
+
+    In PAPER mode, returns the simulated book (same shape) marked to live mids.
     """
+    from hermes_trader.client.paper_engine import paper_mode_active, account_state
+    if paper_mode_active():
+        return account_state(include_hip3=include_hip3)
+
     perp = _http_post("/info", {"type": "clearinghouseState", "user": user})
     spot = _http_post("/info", {"type": "spotClearinghouseState", "user": user})
 
@@ -338,7 +352,11 @@ def fetch_aggregate_contributions_since(user: str, start_ms: int) -> float:
     spot↔HIP-3); treats intra-pool transfers (main↔xyz, xyz↔vntl) as neutral.
 
     Returns 0.0 on lookup failure to avoid distorting PnL on transient outages.
+    Always 0.0 in PAPER mode — the simulated book has no deposits/transfers.
     """
+    from hermes_trader.client.paper_engine import paper_mode_active
+    if paper_mode_active():
+        return 0.0
     if not user or start_ms <= 0:
         return 0.0
     try:

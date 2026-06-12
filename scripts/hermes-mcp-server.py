@@ -172,7 +172,11 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "mode": {"type": "string", "enum": ["OFF", "LIVE"]},
+                "mode": {"type": "string", "enum": ["OFF", "PAPER", "LIVE"],
+                         "description": "OFF = analyse only; PAPER = simulated fills against live prices; LIVE = real orders."},
+                "paper_starting_equity": {"type": "number", "description": "PAPER mode: virtual starting balance (USD)."},
+                "paper_fee_bps": {"type": "number", "description": "PAPER mode: taker fee per side, bps."},
+                "paper_slippage_bps": {"type": "number", "description": "PAPER mode: slippage past the live touch on fills, bps."},
                 # ── Sizing / leverage ────────────────────────────────────
                 "leverage": {"type": "number", "description": "Leverage ceiling per trade (min with coin max)."},
                 "equity_fraction_per_trade": {"type": "number", "description": "Fraction of equity committed as margin per trade."},
