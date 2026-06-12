@@ -23,7 +23,9 @@ RUN mkdir -p /data
 ENV SESSION_LOG_PATH=/data/session-log.jsonl \
     HERMES_DSL_STATE_FILE=/data/.dsl-state.json \
     HERMES_AGENT_CONFIG_FILE=/data/.agent-config.json \
-    HERMES_AGENT_MEMORY_FILE=/data/.agent-memory.json
+    HERMES_AGENT_MEMORY_FILE=/data/.agent-memory.json \
+    HERMES_PAPER_STATE_FILE=/data/.paper-state.json \
+    HERMES_HOST=0.0.0.0
 
 EXPOSE 8000
 
