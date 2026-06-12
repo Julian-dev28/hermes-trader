@@ -95,7 +95,13 @@ threading.Thread(target=_watchdog, name="hermes-watchdog", daemon=True).start()
 logger.info(f"[watchdog] armed pre-startup: re-exec if no progress for {_watchdog_timeout_s}s")
 
 logger.info("=== HERMES TRADER - Starting Continuous Trading Loop ===")
-logger.info(f"Mode: LIVE  env={_args.env}  daemon={_args.daemon}")
+try:
+    from hermes_trader.agents.config_store import read_agent_config as _rac
+    _mode = str(_rac().get("mode", "OFF")).upper()
+except Exception:
+    _mode = "UNKNOWN"
+logger.info(f"Mode: {_mode}  env={_args.env}  daemon={_args.daemon}"
+            + ("  [PAPER — simulated fills, live prices]" if _mode == "PAPER" else ""))
 
 config = get_config()
 # HIP-3 toggle: read once at startup so the prefetched universe includes

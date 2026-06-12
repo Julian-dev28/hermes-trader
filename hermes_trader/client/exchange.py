@@ -37,6 +37,7 @@ from hermes_trader.client.hl_client import (
     fetch_hl_candles,
     resolve_user_address,
 )
+from hermes_trader.client import paper_engine
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,8 @@ def set_leverage(coin: str, leverage: int) -> Dict[str, Any]:
 
     No-op when no private key is set.
     """
+    if paper_engine.paper_mode_active():
+        return paper_engine.set_leverage(coin, leverage)
     if not PRIVATE_KEY_HEX:
         return {"ok": False, "error": "no private key"}
 
@@ -483,6 +486,9 @@ def place_hl_order(
     OVERSHOOT and flip the position to the opposite side without this flag. With
     reduce_only, HL fills only up to the live position size and rejects the rest
     → clean flatten, never a flip."""
+    if paper_engine.paper_mode_active():
+        return paper_engine.place_order(is_buy, size, mid_price, coin,
+                                        reduce_only=reduce_only)
     if not PRIVATE_KEY_HEX:
         return {"ok": False, "error": "HYPERLIQUID_PRIVATE_KEY not set"}
     if mid_price <= 0:
@@ -548,6 +554,9 @@ def place_hl_trigger_order(
     Triggers a market order in the position-closing direction once the
     trigger price is crossed.
     """
+    if paper_engine.paper_mode_active():
+        return paper_engine.place_trigger_order(is_long_position, size,
+                                                trigger_px, kind, coin)
     if not PRIVATE_KEY_HEX:
         return {"ok": False, "error": "HYPERLIQUID_PRIVATE_KEY not set"}
     if size <= 0 or trigger_px <= 0:
@@ -602,6 +611,8 @@ def cancel_open_orders_for_coin(coin: str) -> int:
     stale triggers accumulate and a later reduce-only order on the same coin is
     rejected ('reduce only order would increase position'). Returns the count
     cancelled. Never raises."""
+    if paper_engine.paper_mode_active():
+        return paper_engine.cancel_open_orders_for_coin(coin)
     try:
         user = resolve_user_address()
         if not user:
@@ -622,6 +633,8 @@ def cancel_open_orders_for_coin(coin: str) -> int:
 
 def cancel_orders(oid: int, coin: Optional[str] = None, asset_idx: Optional[int] = None) -> Dict[str, Any]:
     """Cancel an order by order ID."""
+    if paper_engine.paper_mode_active():
+        return paper_engine.cancel_order(oid)
     if not PRIVATE_KEY_HEX:
         return {"ok": False, "error": "PRIVATE_KEY not set"}
     
